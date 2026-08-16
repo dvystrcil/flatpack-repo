@@ -62,7 +62,16 @@ jobs:
 
       - name: Configure AWS CLI for R2
         run: |
-          pip install awscli
+          # Retried: one Fastly edge node in PyPI's rotation serves 502s to this
+          # cluster at ~15% (homelab#1029). pip's own retries reuse the
+          # connection and land back on the same node; a fresh process
+          # re-resolves, so three attempts take ~15% to ~0.3%.
+          for attempt in 1 2 3; do
+            pip install awscli && break
+            [ "$attempt" = 3 ] && { echo "::error::pip install failed three times"; exit 1; }
+            echo "::warning::pip install failed (attempt ${attempt}/3) — retrying"
+            sleep $((attempt * 10))
+          done
           aws configure set aws_access_key_id $FP_R2_ACCESS_KEY_ID
           aws configure set aws_secret_access_key $FP_R2_SECRET_ACCESS_KEY
           aws configure set region auto
