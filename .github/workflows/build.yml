@@ -3,18 +3,25 @@ name: Build and Publish Flatpak
 on:
   push:
     branches: [ main ]
+    # Named explicitly rather than by glob. '**.json' also matched
+    # renovate.json, so adding a dependency-bot config on 2026-07-31 triggered
+    # a full publish of the flatpak — a file with no bearing on the bundle
+    # republishing the application.
     paths:
-      - '**.json'
-      - '**.sh'
-      - '**.png'
-      - '**.desktop'
-      - '**.html'
+      - 'com.megamek.mekhq.json'
+      - 'com.megamek.mekhq.metainfo.xml'
+      - 'com.megamek.mekhq.desktop'
+      - 'mekhq-wrapper.sh'
+      - 'mekhq.png'
+      - 'index.html'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
     inputs:
       version:
-        description: 'MekHQ version (without v prefix, e.g. 0.50.11)'
+        description: 'MekHQ version to build, without the v prefix (e.g. 0.51.0)'
         required: true
-        default: '0.50.11'
+        # No default. A prefilled version is a version someone can publish by
+        # accident, and this input publishes over whatever is live.
 
 permissions:
   contents: write
@@ -22,7 +29,58 @@ permissions:
   id-token: write
 
 jobs:
+  # Resolved before the build, on a runner that has `gh`, so the version comes
+  # from a real source instead of a literal baked into the workflow.
+  #
+  # A push-triggered rebuild carries no dispatch input. It used to fall back to
+  # a hardcoded '0.50.11', so any push touching a matched path republished that
+  # exact version over whatever was live. On 2026-07-31 a commit adding
+  # renovate.json did exactly that, downgrading the published flatpak from
+  # 0.51.0 to 0.50.11, where it stayed for 40 days.
+  #
+  # The mekhq-built-<version> tags already record what has been built, so a
+  # rebuild republishes the version that is current rather than inventing one.
+  resolve-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolve MekHQ version to build
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION:-}"
+          source="workflow_dispatch input"
+
+          if [ -z "$version" ]; then
+            source="latest mekhq-built-* tag"
+            version="$(gh api "repos/${REPO}/git/matching-refs/tags/mekhq-built-" \
+              --jq '.[].ref | sub("^refs/tags/mekhq-built-"; "")' \
+              | sort -V | tail -1)"
+          fi
+
+          version="${version#v}"
+
+          # No input and no tag leaves no defensible answer. Guessing one is
+          # what published the wrong build for 40 days, so stop instead: an
+          # unbuilt repo is recoverable, a silent downgrade of a live artifact
+          # is not.
+          if [ -z "$version" ]; then
+            echo "::error::Cannot determine which MekHQ version to build: no workflow_dispatch input and no mekhq-built-* tag exists. Dispatch this workflow with an explicit version."
+            exit 1
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Building MekHQ v${version} (from ${source})"
+
   build:
+    needs: resolve-version
     runs-on: flatpak-repo-runner
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -35,7 +93,7 @@ jobs:
       - name: Set version
         id: version
         run: |
-          VERSION="${{ github.event.inputs.version || '0.50.11' }}"
+          VERSION="${{ needs.resolve-version.outputs.version }}"
           # Strip leading 'v' if someone included it
           VERSION="${VERSION#v}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
